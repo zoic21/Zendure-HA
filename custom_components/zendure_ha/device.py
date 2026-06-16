@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import traceback
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -90,6 +91,20 @@ class ZendureBattery(EntityDevice):
         name, model, self.kWh = ZendureBattery.get_battery_type(sn)
         super().__init__(hass, sn, name, model, "", sn, parent.sn)
         self.attr_device_info["serial_number"] = sn
+        self.deltaVoltage = ZendureSensor(self, "deltaVoltage", None, "V", "voltage", "measurement", 3)
+
+    def entityUpdate(self, key: Any, value: Any) -> bool:
+        """Update entity state and recalculate deltaVoltage when maxVol or minVol changes."""
+        changed = super().entityUpdate(key, value)
+        if changed and key in {"maxVol", "minVol"}:
+            max_vol = self.entities.get("maxVol")
+            min_vol = self.entities.get("minVol")
+            if max_vol is not None and min_vol is not None:
+                max_val = max_vol.asNumber
+                min_val = min_vol.asNumber
+                if max_val != 0 and min_val != 0:
+                    self.deltaVoltage.update_value(round(max_val - min_val, 3))
+        return changed
 
 
 class ZendureDevice(EntityDevice):
@@ -168,6 +183,8 @@ class ZendureDevice(EntityDevice):
 
         self.aggrCharge = ZendureRestoreSensor(self, "aggrCharge", None, "kWh", "energy", "total_increasing", 2)
         self.aggrDischarge = ZendureRestoreSensor(self, "aggrDischarge", None, "kWh", "energy", "total_increasing", 2)
+        # Round-trip efficiency: ratio of total energy discharged to total energy charged, expressed as a percentage
+        self.roundtripEfficiency = ZendureSensor(self, "roundtripEfficiency", None, "%", None, "measurement", 1)
         self.aggrHomeInput = ZendureRestoreSensor(self, "aggrGridInputPower", None, "kWh", "energy", "total_increasing", 2)
         self.aggrHomeOut = ZendureRestoreSensor(self, "aggrOutputHome", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
@@ -227,10 +244,12 @@ class ZendureDevice(EntityDevice):
                             self.aggrCharge.aggregate(dt_util.now(), value)
                         self.aggrDischarge.aggregate(dt_util.now(), 0)
                         self.batInOut.update_value(self.batteryOutput.asInt - self.batteryInput.asInt)
+                        self.roundtripEfficiency.update_value(round(self.aggrDischarge.asNumber / charge * 100, 1) if (charge := self.aggrCharge.asNumber) > 0 else 0)
                     case "packInputPower":
                         self.aggrCharge.aggregate(dt_util.now(), 0)
                         self.aggrDischarge.aggregate(dt_util.now(), value)
                         self.batInOut.update_value(self.batteryOutput.asInt - self.batteryInput.asInt)
+                        self.roundtripEfficiency.update_value(round(self.aggrDischarge.asNumber / charge * 100, 1) if (charge := self.aggrCharge.asNumber) > 0 else 0)
                     case "solarInputPower":
                         self.aggrSolar.aggregate(dt_util.now(), value)
                     case "gridInputPower":
